@@ -154,11 +154,26 @@ def _get_invidious_streams(t: Dict[str, Any]) -> Dict[str, Union[str, None]]:
     standard_video_url = None 
     
     # 1. 最高画質の動画ストリーム（映像専用/acodec="none"）を抽出 (adaptiveFormats)
+    
+    def custom_video_sort_key(f: Dict[str, Any]):
+        # itagが文字列と数値の両方に対応
+        itag = str(f.get('itag', '0'))
+        height = int(f.get('height', 0))
+        bitrate = int(f.get('bitrate', 0))
+        
+        # 優先度1: itag 299または303であれば最高優先度 (1) を与える
+        priority_itag = 1 if itag in ('299', '303') else 0
+        
+        # 優先度: (itag優先フラグ, height, bitrate) - 全て降順でソート
+        return (priority_itag, height, bitrate)
+
+    # 映像専用ストリームのみをフィルタリングし、カスタムソートで最高画質を選ぶ
     video_only_streams = sorted(
         [f for f in adaptive_formats if f.get('acodec') == 'none' and f.get('vcodec') != 'none'],
-        key=lambda x: int(x.get('height', 0)),
+        key=custom_video_sort_key,
         reverse=True
     )
+    
     if video_only_streams:
         high_quality_video_url = video_only_streams[0].get('url')
         
@@ -176,7 +191,7 @@ def _get_invidious_streams(t: Dict[str, Any]) -> Dict[str, Union[str, None]]:
     # -----------------------------------------------------------------
 
     
-    # 2. 音声ストリーム (音声専用/vcodec="none") の抽出
+    # 2. 音声ストリーム (音声専用/vcodec="none") の抽出 (変更なし)
     audio_only_streams = [f for f in adaptive_formats if f.get('vcodec') == 'none' and f.get('acodec') != 'none']
     
     if audio_only_streams:
@@ -195,7 +210,7 @@ def _get_invidious_streams(t: Dict[str, Any]) -> Dict[str, Union[str, None]]:
                 high_quality_audio_url = sorted_audio_streams[0].get('url')
     
     
-    # adaptiveFormatsで音声が見つからない場合のフォールバックロジック (formatStreamsから最高音質を取得)
+    # adaptiveFormatsで音声が見つからない場合のフォールバックロジック (変更なし)
     if not high_quality_audio_url and video_formats:
         best_audio_in_formats = sorted(
             [f for f in video_formats if f.get('acodec') != 'none'],
@@ -206,7 +221,7 @@ def _get_invidious_streams(t: Dict[str, Any]) -> Dict[str, Union[str, None]]:
             high_quality_audio_url = best_audio_in_formats[0].get('url')
     
 
-    # 3. 360p相当の音声付き単一ファイル (formatStreams)
+    # 3. 360p相当の音声付き単一ファイル (formatStreams) (変更なし)
     standard_streams = sorted(
         [f for f in video_formats if f.get('vcodec') != 'none' and f.get('acodec') != 'none'],
         key=lambda x: int(x.get('height', 0)),
@@ -217,7 +232,8 @@ def _get_invidious_streams(t: Dict[str, Any]) -> Dict[str, Union[str, None]]:
     if target_360p:
         standard_video_url = target_360p.get('url')
     elif standard_streams:
-        standard_video_url = standard_streams[-1].get('url')
+        # 最も解像度の低いものを標準画質として採用
+        standard_video_url = standard_streams[-1].get('url') 
 
     return {
         "high_quality_video_url": high_quality_video_url,
