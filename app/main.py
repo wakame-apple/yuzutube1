@@ -153,6 +153,7 @@ def _get_invidious_streams(t: Dict[str, Any]) -> Dict[str, Union[str, None]]:
     high_quality_audio_url = None
     standard_video_url = None 
     
+    # 1. 最高画質の動画ストリーム（映像専用/acodec="none"）を抽出 (adaptiveFormats)
     video_only_streams = sorted(
         [f for f in adaptive_formats if f.get('acodec') == 'none' and f.get('vcodec') != 'none'],
         key=lambda x: int(x.get('height', 0)),
@@ -161,9 +162,25 @@ def _get_invidious_streams(t: Dict[str, Any]) -> Dict[str, Union[str, None]]:
     if video_only_streams:
         high_quality_video_url = video_only_streams[0].get('url')
         
+    # --- 修正ロジック: 映像専用ストリームがない場合のフォールバック ---
+    if not high_quality_video_url and video_formats:
+        # formatStreams（音声付き単一ファイル）の中で最も高画質なものを探す
+        best_video_in_formats = sorted(
+            [f for f in video_formats if f.get('vcodec') != 'none'],
+            key=lambda x: int(x.get('height', 0)),
+            reverse=True
+        )
+        if best_video_in_formats:
+            # 最も解像度の高いものをフォールバックとして採用
+            high_quality_video_url = best_video_in_formats[0].get('url')
+    # -----------------------------------------------------------------
+
+    
+    # 2. 音声ストリーム (音声専用/vcodec="none") の抽出
     audio_only_streams = [f for f in adaptive_formats if f.get('vcodec') == 'none' and f.get('acodec') != 'none']
     
     if audio_only_streams:
+        # adaptiveFormatsからitag 140 (M4A/AAC) を優先し、なければビットレート最高を採用
         itag_140_stream = next((f for f in audio_only_streams if f.get('itag') in ('140', 140)), None)
         
         if itag_140_stream:
@@ -178,6 +195,7 @@ def _get_invidious_streams(t: Dict[str, Any]) -> Dict[str, Union[str, None]]:
                 high_quality_audio_url = sorted_audio_streams[0].get('url')
     
     
+    # adaptiveFormatsで音声が見つからない場合のフォールバックロジック (formatStreamsから最高音質を取得)
     if not high_quality_audio_url and video_formats:
         best_audio_in_formats = sorted(
             [f for f in video_formats if f.get('acodec') != 'none'],
@@ -188,6 +206,7 @@ def _get_invidious_streams(t: Dict[str, Any]) -> Dict[str, Union[str, None]]:
             high_quality_audio_url = best_audio_in_formats[0].get('url')
     
 
+    # 3. 360p相当の音声付き単一ファイル (formatStreams)
     standard_streams = sorted(
         [f for f in video_formats if f.get('vcodec') != 'none' and f.get('acodec') != 'none'],
         key=lambda x: int(x.get('height', 0)),
@@ -205,7 +224,7 @@ def _get_invidious_streams(t: Dict[str, Any]) -> Dict[str, Union[str, None]]:
         "high_quality_audio_url": high_quality_audio_url,
         "standard_video_url": standard_video_url, 
     }
-
+    
 async def getVideoData(videoid):
     t_text = await run_in_threadpool(requestAPI, f"/videos/{urllib.parse.quote(videoid)}", invidious_api.video)
     t = json.loads(t_text)
@@ -318,7 +337,22 @@ app.mount(
     name="static"
 )
 
+@app.get('/stream/{videoid}', response_class=Response)
+async def get_invidious_video_data_raw(videoid: str):
 
+    try:
+        t_text = await run_in_threadpool(requestAPI, f"/videos/{urllib.parse.quote(videoid)}", invidious_api.video)
+        
+        # 取得したJSONテキストをそのままレスポンスとして返す
+        return Response(content=t_text, media_type="application/json")
+        
+    except APITimeoutError as e:
+        error_message = json.dumps({"error": f"Invidious API Timeout"})
+        return Response(content=error_message, media_type="application/json", status_code=503)
+    except Exception as e:
+        error_message = json.dumps({"error": f"An unexpected error occurred"})
+        return Response(content=error_message, media_type="application/json", status_code=500)
+        
 @app.get("/api/edu")
 async def get_edu_key_route():
     
