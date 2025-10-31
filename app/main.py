@@ -232,6 +232,7 @@ async def getCommentsData(videoid):
     t = json.loads(t_text)["comments"]
     return [{"author": i["author"], "authoricon": i["authorThumbnails"][-1]["url"], "authorid": i["authorId"], "body": i["contentHtml"].replace("\n", "<br>")} for i in t]
 
+# HLSフォールバックURLを取得する関数は変更なし
 def get_fallback_hls_url(videoid: str) -> str:
     
     FALLBACK_API_URL = f"https://test-live-tau.vercel.app/get/url/{videoid}"
@@ -263,7 +264,8 @@ def get_fallback_hls_url(videoid: str) -> str:
 
 def get_360p_single_url(videoid: str) -> str:
     
-    YTDL_API_URL = f"https://ytdlp-cache.vercel.app/dl/{videoid}"
+    # API URLの変更
+    YTDL_API_URL = f"https://server-thxk.onrender.com/stream/{videoid}"
     
     
     try:
@@ -275,31 +277,31 @@ def get_360p_single_url(videoid: str) -> str:
         res.raise_for_status()
         data = res.json()
         
-        formats: List[Dict[str, Any]] = data.get("res_data", {}).get("formats", [])
+        formats: List[Dict[str, Any]] = data.get("formats", [])
         if not formats:
             
             raise ValueError("External API response is missing video formats.")
             
         
+        # itag 18 (360p, 音声付き, mp4)を探す
         target_format = next((
             f for f in formats 
-            if f.get("itag") == 18 and 
-               f.get("vcodec") != "none" and 
-               f.get("acodec") != "none"
+            if f.get("itag") == "18" and 
+               f.get("audioIncluded") is True
         ), None)
         
         if not target_format:
             
+            # itag 18が見つからない場合は、360pでaudioIncluded: trueのストリームを探す
             target_format = next((
                 f for f in formats 
-                if "360p" in f.get("quality", "") and 
-                   f.get("vcodec") != "none" and 
-                   f.get("acodec") != "none"
+                if f.get("qualityLabel") == "360p" and 
+                   f.get("audioIncluded") is True
             ), None)
 
-        if target_format and target_format.get("url"):
+        if target_format and target_format.get("videoUrl"):
             
-            return target_format["url"]
+            return target_format["videoUrl"]
             
         
         raise ValueError("Could not find a single 360p stream with audio (itag 18 or similar) in the main API response.")
@@ -323,7 +325,8 @@ def get_360p_single_url(videoid: str) -> str:
 
 def fetch_high_quality_streams(videoid: str) -> dict:
     
-    YTDL_API_URL = f"https://ytdlp-cache.vercel.app/dl/{videoid}"
+    # API URLの変更
+    YTDL_API_URL = f"https://server-thxk.onrender.com/stream/{videoid}"
     
     try:
         res = requests.get(
@@ -334,57 +337,68 @@ def fetch_high_quality_streams(videoid: str) -> dict:
         res.raise_for_status()
         data = res.json()
         
-        formats = data.get("res_data", {}).get("formats", [])
+        formats: List[Dict[str, Any]] = data.get("formats", [])
         if not formats:
             raise ValueError("External API response is missing video formats.")
+        
+        # 許可される動画のitagを定義（高画質順に並べる）
+        # '399', '299', '248', '137', '247', '398', '397', '396', '395', '136', '135', '134', '133', '160'
+        # 新しいAPIにはqualityLabel/resolutionがあるため、そちらを優先する
             
-        def get_video_quality_score(f):
-            quality_str = f.get("quality", "0").lower().replace("p", "").replace("p60", "60").replace("p30", "30").replace("high", "0")
+        
+        # 映像専用ストリームのフィルタリング
+        video_only_formats = [
+            f for f in formats 
+            if f.get("audioIncluded") is False and 
+               f.get("resolution") not in (None, "0p") 
+        ]
+        
+        # 最高の動画ストリームを探す
+        def get_resolution_score(f):
+            # resolutionを '1920p' -> 1920 に変換してスコアリング
+            res_str = f.get("resolution", "0p").replace("p", "")
             try:
-                
-                if "60" in quality_str:
-                    return int(quality_str.replace("60", "")) * 100 + 60
-                else:
-                    return int(quality_str) * 100 + 30
+                return int(res_str)
             except ValueError:
                 return 0
             
-        
-        video_formats = [f for f in formats if f.get("acodec") == "none" and f.get("vcodec") != "none"]
-        video_formats.sort(key=get_video_quality_score, reverse=True)
+        video_only_formats.sort(key=get_resolution_score, reverse=True)
         
         high_quality_video_url = None
-        
-        
-        target_1080p_formats = [f for f in video_formats if "1080" in f.get("quality", "")]
-        
-        if target_1080p_formats:
-            
-            high_quality_video_url = target_1080p_formats[0]["url"]
-        elif video_formats:
-            
-            high_quality_video_url = video_formats[0]["url"]
+        if video_only_formats:
+            high_quality_video_url = video_only_formats[0]["videoUrl"]
             
         
         
-        audio_formats_m4a = [
+        # 音声専用ストリームのフィルタリング (audioIncluded: false)
+        audio_only_formats = [
             f for f in formats 
-            if f.get("vcodec") == "none" and 
-               f.get("acodec") != "none" and 
-               f.get("ext") == "m4a"
+            if f.get("audioIncluded") is False and 
+               f.get("container") == "m4a"
         ]
         
         high_quality_audio_url = None
         
-        if audio_formats_m4a:
-            
-            audio_formats_m4a.sort(key=lambda x: int(x.get("filesize", 0) or 0), reverse=True)
-            high_quality_audio_url = audio_formats_m4a[0]["url"]
+        # 1. itag 140 (AAC/m4a) を優先
+        target_140 = next((f for f in audio_only_formats if f.get("itag") == "140"), None)
+        
+        if target_140:
+            high_quality_audio_url = target_140["videoUrl"] # 新しいAPIでは動画・音声問わず"videoUrl"
+        elif audio_only_formats:
+            # 2. 他の m4a ストリームを品質（不明な場合はリストの最初のもの）で選択
+            high_quality_audio_url = audio_only_formats[0]["videoUrl"]
         else:
-            
-            audio_formats_other = [f for f in formats if f.get("vcodec") == "none" and f.get("acodec") != "none"]
-            audio_formats_other.sort(key=lambda x: int(x.get("filesize", 0) or 0), reverse=True)
-            high_quality_audio_url = audio_formats_other[0]["url"] if audio_formats_other else None
+            # 3. m4a が見つからない場合、他の音声専用ストリームを探す (例: webm/opus)
+            other_audio_only_formats = [
+                f for f in formats 
+                if f.get("audioIncluded") is False and 
+                   f.get("container") in ("webm", "opus")
+            ]
+            if other_audio_only_formats:
+                # itag 251, 250, 249
+                # 一般的に251が最高品質のOpusだが、ここでは最初のものを採用
+                high_quality_audio_url = other_audio_only_formats[0]["videoUrl"]
+
         
         if not high_quality_video_url or not high_quality_audio_url:
             raise ValueError("Could not find both high-quality video and audio streams.")
@@ -392,7 +406,7 @@ def fetch_high_quality_streams(videoid: str) -> dict:
         return {
             "video_url": high_quality_video_url, 
             "audio_url": high_quality_audio_url,
-            "title": data.get("res_data", {}).get("title", "Video")
+            "title": data.get("title", "Video") 
         }
 
     except requests.exceptions.HTTPError as e:
