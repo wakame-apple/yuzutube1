@@ -8,4 +8,3 @@ startCommand<br>
 uvicorn app.main:app --host 0.0.0.0 --port $PORT
 ```
 バクの修正とかは本サイトではします<br>
-配信見れるようにしたい
