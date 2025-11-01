@@ -25,61 +25,69 @@
             height: 100%;
             object-fit: contain;
         }
-        #audio-player {
-            display: none; /* 音声は非表示 */
-        }
     </style>
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
 </head>
 <body>
     <div id="video-container">
-        <video id="video-player" controls playsinline muted>
-            <source src="{{ video_url }}" type="video/mp4">
-            ブラウザが動画タグをサポートしていません。
-        </video>
-        
-        <audio id="audio-player" preload="auto">
-            <source src="{{ audio_url }}" type="audio/mp4">
-        </audio>
+        <video id="video-player" controls playsinline></video> 
     </div>
 
     <script>
         const video = document.getElementById('video-player');
-        const audio = document.getElementById('audio-player');
-
-        // --- ユーザー操作によるミュート解除 (オプション) ---
-        // ユーザーが動画領域を一度でも操作したらミュートを解除し、音声を有効にする
-        video.addEventListener('click', () => {
-            if (video.muted) {
-                video.muted = false; // ミュート解除
-                console.log("Mute removed by user interaction. Sound enabled.");
-            }
-        });
-
-        // --- 継続的な追尾（同期）処理 ---
-
-        // 動画の再生イベントにフックし、音声を同期・再生させる
-        video.addEventListener('play', () => {
-            // 再生開始時、または再開時に同期を試みる
-            // 動画と音声の再生時間のずれが0.2秒以上あれば、音声時間を動画時間に合わせる（追尾）
-            if (Math.abs(video.currentTime - audio.currentTime) > 0.2) {
-                audio.currentTime = video.currentTime;
-            }
-            
-            // 動画が再生されたら音声も再生（追尾）
-            // ユーザーが動画の再生ボタンを押した時に、このplayイベントが発火します
-            audio.play().catch(e => console.error("Audio play failed on video play event:", e));
-        });
-
-        video.addEventListener('pause', () => {
-            // 動画が一時停止したら音声も一時停止（追尾）
-            audio.pause();
-        });
+        // バックエンドから渡されるHLSマニフェストURL
+        const hlsUrl = "{{ video_url }}"; 
         
-        video.addEventListener('seeking', () => {
-            // 動画がシークされたら音声もシーク（追尾）
-            audio.currentTime = video.currentTime;
-        });
+        // --- hls.js による HLS (m3u8) ストリームの再生 ---
 
+        if (Hls.isSupported()) {
+            const hls = new Hls();
+            
+            // hls.js がストリームURLを読み込み、Video要素にアタッチする
+            hls.loadSource(hlsUrl);
+            hls.attachMedia(video);
+            
+            hls.on(Hls.Events.MANIFEST_PARSED, function() {
+                // HLSマニフェストがパースされたら、自動再生を試みる
+                // ブラウザのポリシーにより失敗する可能性があるため、catchでエラーを握りつぶす
+                video.play().catch(e => {
+                    console.log("Autoplay failed. User interaction is required.");
+                    // iOSなどの環境では、`playsinline`があってもミュートでないと自動再生できないことがある
+                    // ここではユーザーに操作してもらうことを優先し、エラー表示はしない
+                });
+            });
+            
+            hls.on(Hls.Events.ERROR, function (event, data) {
+                if (data.fatal) {
+                    console.error('HLS Fatal Error:', data.details, data.error);
+                    // 致命的なエラーが発生した場合、フォールバックとしてネイティブ再生を試みる
+                    switch (data.type) {
+                        case Hls.ErrorTypes.NETWORK_ERROR:
+                            hls.startLoad(); // リロードを試みる
+                            break;
+                        case Hls.ErrorTypes.MEDIA_ERROR:
+                            hls.recoverMediaError(); // エラーからの回復を試みる
+                            break;
+                        default:
+                            // それでもダメならネイティブ再生へフォールバック (HLS URLがネイティブ対応している場合のみ)
+                            video.src = hlsUrl;
+                            video.load();
+                            video.play().catch(e => console.error("Native playback failed:", e));
+                            break;
+                    }
+                }
+            });
+            
+        } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+            // HLS.jsがサポートされていないが、ブラウザがネイティブHLSをサポートしている場合 (Safariなど)
+            video.src = hlsUrl;
+            video.addEventListener('loadedmetadata', function() {
+                video.play().catch(e => console.log("Native Autoplay failed."));
+            });
+        } else {
+            // どちらもサポートされていない場合のメッセージ
+            video.innerHTML = 'ブラウザがHLSストリームの再生をサポートしていません。';
+        }
     </script>
 </body>
 </html>
