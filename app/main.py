@@ -307,38 +307,41 @@ def get_360p_single_url(videoid: str) -> str:
             raise ValueError(f"Fallback HLS API failed: {fallback_e}") from fallback_e
 
 
+
 def fetch_high_quality_streams(videoid: str) -> dict:
     
     YTDL_API_URL = f"https://server-thxk.onrender.com/high/{videoid}"
     
     try:
+        # 修正点 1: タイムアウト設定を削除し、応答が遅くても待機するようにする
         res = requests.get(
             YTDL_API_URL, 
-            headers=getRandomUserAgent(), 
-            timeout=max_api_wait_time
+            headers=getRandomUserAgent()
         )
         res.raise_for_status()
         data = res.json()
         
-        high_quality_video_url = data.get("video", {}).get("videoUrl")
-        high_quality_audio_url = data.get("audio", {}).get("videoUrl") 
+        # 修正点 2: レスポンス例に基づいて、HLSストリームを含む 'm3u8Url' を抽出する
+        hls_url = data.get("m3u8Url")
         
         
-        if not high_quality_video_url or not high_quality_audio_url:
-            raise ValueError("Could not find both high-quality video and audio streams from the external API.")
+        if not hls_url:
+            # 抽出できなかった場合はエラーを発生させる
+            raise ValueError("Could not find m3u8Url in the external high-quality stream API response.")
             
         
+        # HLSストリーム（m3u8）は動画と音声を含むため、audio_urlは空文字列を返す
         return {
-            "video_url": high_quality_video_url, 
-            "audio_url": high_quality_audio_url,
-            "title": f"High Quality Stream for {videoid}" 
+            "video_url": hls_url, # HLS (m3u8) マニフェストURL
+            "audio_url": "",
+            "title": f"{data.get('resolution', 'High Quality')} Stream for {videoid}" 
         }
 
     except requests.exceptions.HTTPError as e:
         raise APITimeoutError(f"External stream API returned HTTP error: {e.response.status_code}") from e
     except (requests.exceptions.RequestException, ValueError, json.JSONDecodeError) as e:
         raise APITimeoutError(f"Error processing external stream API response: {e}") from e
-        
+
 async def fetch_embed_url_from_external_api(videoid: str) -> str:
     
     
