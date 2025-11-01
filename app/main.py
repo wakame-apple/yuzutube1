@@ -312,31 +312,31 @@ def fetch_high_quality_streams(videoid: str) -> dict:
     YTDL_API_URL = f"https://server-thxk.onrender.com/high/{videoid}"
     
     try:
-        
         res = requests.get(
             YTDL_API_URL, 
-            headers=getRandomUserAgent()
+            headers=getRandomUserAgent(), 
+            timeout=max_api_wait_time
         )
         res.raise_for_status()
         data = res.json()
         
-        hls_url = data.get("m3u8Url")
+        high_quality_video_url = data.get("video", {}).get("videoUrl")
+        high_quality_audio_url = data.get("audio", {}).get("videoUrl") 
         
-        if not hls_url:
-            raise ValueError("Could not find m3u8Url in the external high-quality stream API response.")
+        
+        if not high_quality_video_url or not high_quality_audio_url:
+            raise ValueError("Could not find both high-quality video and audio streams from the external API.")
             
         
         return {
-            "video_url": hls_url, 
-            "audio_url": "",      
-            "title": f"{data.get('resolution', 'High Quality')} Stream for {videoid}" 
+            "video_url": high_quality_video_url, 
+            "audio_url": high_quality_audio_url,
+            "title": f"High Quality Stream for {videoid}" 
         }
 
     except requests.exceptions.HTTPError as e:
-        
         raise APITimeoutError(f"External stream API returned HTTP error: {e.response.status_code}") from e
     except (requests.exceptions.RequestException, ValueError, json.JSONDecodeError) as e:
-        
         raise APITimeoutError(f"Error processing external stream API response: {e}") from e
         
 async def fetch_embed_url_from_external_api(videoid: str) -> str:
@@ -391,12 +391,11 @@ async def embed_high_quality_video(request: Request, videoid: str, proxy: Union[
         
     except APITimeoutError as e:
         print(f"Error calling external stream API: {e}")
-        return Response(f"Failed to retrieve high-quality stream URL: {e}", status_code=503)
+        return Response(f"Failed to retrieve high-quality stream URL", status_code=503)
         
     except Exception as e:
-        error_detail = f"{type(e).__name__}: {str(e)}"
-        print(f"An unexpected error occurred: {error_detail}")
-        return Response(f"An unexpected error occurred while retrieving stream data. Detail: {error_detail}", status_code=500)
+        print(f"An unexpected error occurred: {e}")
+        return Response("An unexpected error occurred while retrieving stream data.", status_code=500)
 
     
     return templates.TemplateResponse(
@@ -488,7 +487,7 @@ async def access_gate_post(request: Request, access_code: str = Form(...)):
         response = RedirectResponse(url="/", status_code=302)
         
         expires_time = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=1)
-        response.set_cookie(key="yuzu_access_granted", value="True", expires=expires_time.strftime("%a, %d-%b-%Y %H:%M:%S GMT"), httpyuzu_access_grantedly=True)
+        response.set_cookie(key="yuzu_access_granted", value="True", expires=expires_time.strftime("%a, %d-%b-%Y %H:%M:%S GMT"), httponly=True)
         return response
     else:
         
@@ -513,7 +512,7 @@ async def video(v:str, request: Request, proxy: Union[str] = Cookie(None)):
 
 @app.get("/search", response_class=HTMLResponse)
 async def search(q:str, request: Request, page:Union[int, None]=1, proxy: Union[str] = Cookie(None)):
-   search_results = await getSearchData(q, page)
+    search_results = await getSearchData(q, page)
     return templates.TemplateResponse("search.html", {"request": request, "results":search_results, "word":q, "next":f"/search?q={q}&page={page + 1}", "proxy":proxy})
 
 @app.get("/hashtag/{tag}")
