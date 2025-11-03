@@ -575,9 +575,43 @@ async def hashtag_search(tag:str):
 
 @app.get("/channel/{channelid}", response_class=HTMLResponse)
 async def channel(channelid:str, request: Request, proxy: Union[str] = Cookie(None)):
-    t = await getChannelData(channelid)
-    return templates.TemplateResponse("channel.html", {"request": request, "results": t[0], "channel_name": t[1]["channel_name"], "channel_icon": t[1]["channel_icon"], "channel_profile": t[1]["channel_profile"], "cover_img_url": t[1]["author_banner"], "subscribers_count": t[1]["subscribers_count"], "tags": t[1]["tags"], "proxy": proxy})
-
+    
+    # 既存のチャンネル情報と最新動画の取得
+    channel_data = await getChannelData(channelid)
+    latest_videos = channel_data[0]
+    channel_info = channel_data[1]
+    
+    shorts_videos = []
+    try:
+        # 新しく追加したAPIラッパー関数を使用してShortsデータを取得
+        shorts_data = await fetch_short_data_from_external_api(channelid)
+。
+        
+        # 外部APIのレスポンス構造が不明なため、リスト形式であると仮定
+        if isinstance(shorts_data, list):
+            shorts_videos = shorts_data
+        elif isinstance(shorts_data, dict) and "videos" in shorts_data:
+            # もしレスポンスが {"videos": [...]} のような形式なら
+            shorts_videos = shorts_data["videos"]
+        
+    except Exception as e:
+        print(f"Error fetching shorts data for {channelid}: {e}")
+        # エラーが発生した場合、空のリストのままにする
+        shorts_videos = [] 
+        
+    return templates.TemplateResponse("channel.html", {
+        "request": request, 
+        "results": latest_videos, # 最新動画
+        "shorts": shorts_videos,  # Short動画リストをテンプレートに追加
+        "channel_name": channel_info["channel_name"], 
+        "channel_icon": channel_info["channel_icon"], 
+        "channel_profile": channel_info["channel_profile"], 
+        "cover_img_url": channel_info["author_banner"], 
+        "subscribers_count": channel_info["subscribers_count"], 
+        "tags": channel_info["tags"], 
+        "proxy": proxy
+    })
+    
 @app.get("/playlist", response_class=HTMLResponse)
 async def playlist(list:str, request: Request, page:Union[int, None]=1, proxy: Union[str] = Cookie(None)):
     playlist_data = await getPlaylistData(list, str(page))
