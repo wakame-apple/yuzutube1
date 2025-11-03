@@ -28,7 +28,7 @@ MAX_RETRIES = 10
 RETRY_DELAY = 3.0 
 
 EDU_STREAM_API_BASE_URL = "https://siawaseok.duckdns.org/api/stream/" 
-SHORT_STREAM_API_BASE_URL = "https://yt-dl-kappa.vercel.app/short/" # Short APIのベースURLを追加
+SHORT_STREAM_API_BASE_URL = "https://yt-dl-kappa.vercel.app/short/"
 
 
 invidious_api_data = {
@@ -131,9 +131,10 @@ def getEduKey():
             return data.get("key")
         
     except requests.exceptions.RequestException as e:
-        print(f"Kahoot API request failed: {e}")
+        
+        pass
     except json.JSONDecodeError:
-        print("Kahoot API returned non-JSON data.")
+        pass
     
     return None
 
@@ -186,15 +187,18 @@ async def getChannelData(channelid):
         
         latest_videos_check = t.get('latestvideo') or t.get('latestVideos')
         if not latest_videos_check:
-            print(f"API returned no latest videos for channel {channelid}. Treating as failure.")
+            
             t = {}
 
     except APITimeoutError:
-        print(f"Error: Invidious API timeout for channel {channelid}. Using default data.")
+        
+        pass
     except json.JSONDecodeError:
-        print(f"Error: JSON decode failed for channel {channelid}. Using default data.")
+        
+        pass
     except Exception as e:
-        print(f"An unexpected error occurred while fetching channel data for {channelid}: {e}")
+        
+        pass
         
     
     
@@ -293,7 +297,7 @@ def get_360p_single_url(videoid: str) -> str:
         raise ValueError("Could not find a single 360p stream with audio (itag 18) in the main API response.")
 
     except (requests.exceptions.RequestException, ValueError, json.JSONDecodeError) as e:
-        print(f"Main 360p API failed for {videoid}: {e}. Trying fallback.")
+        
         
         
         try:
@@ -314,7 +318,7 @@ def fetch_high_quality_streams(videoid: str) -> dict:
     YTDL_API_URL = f"https://server-thxk.onrender.com/high/{videoid}"
     
     try:
-        # 修正点 1: タイムアウト設定を削除し、応答が遅くても待機するようにする
+        
         res = requests.get(
             YTDL_API_URL, 
             headers=getRandomUserAgent()
@@ -322,18 +326,18 @@ def fetch_high_quality_streams(videoid: str) -> dict:
         res.raise_for_status()
         data = res.json()
         
-        # 修正点 2: レスポンス例に基づいて、HLSストリームを含む 'm3u8Url' を抽出する
+        
         hls_url = data.get("m3u8Url")
         
         
         if not hls_url:
-            # 抽出できなかった場合はエラーを発生させる
+            
             raise ValueError("Could not find m3u8Url in the external high-quality stream API response.")
             
         
-        # HLSストリーム（m3u8）は動画と音声を含むため、audio_urlは空文字列を返す
+        
         return {
-            "video_url": hls_url, # HLS (m3u8) マニフェストURL
+            "video_url": hls_url, 
             "audio_url": "",
             "title": f"{data.get('resolution', 'High Quality')} Stream for {videoid}" 
         }
@@ -365,11 +369,8 @@ async def fetch_embed_url_from_external_api(videoid: str) -> str:
 
     return await run_in_threadpool(sync_fetch)
 
-# --- Short動画データ取得関数の追加 ---
 async def fetch_short_data_from_external_api(channelid: str) -> Dict[str, Any]:
-    """
-    指定された外部APIからShortsのデータを非同期で取得する。
-    """
+    
     target_url = f"{SHORT_STREAM_API_BASE_URL}{urllib.parse.quote(channelid)}"
     
     def sync_fetch():
@@ -382,7 +383,6 @@ async def fetch_short_data_from_external_api(channelid: str) -> Dict[str, Any]:
         return res.json()
 
     return await run_in_threadpool(sync_fetch)
-# -----------------------------------
 
 
 app = FastAPI()
@@ -413,11 +413,11 @@ async def embed_high_quality_video(request: Request, videoid: str, proxy: Union[
         stream_data = await run_in_threadpool(fetch_high_quality_streams, videoid)
         
     except APITimeoutError as e:
-        print(f"Error calling external stream API: {e}")
+        
         return Response(f"Failed to retrieve high-quality stream URL", status_code=503)
         
     except Exception as e:
-        print(f"An unexpected error occurred: {e}")
+        
         return Response("An unexpected error occurred while retrieving stream data.", status_code=500)
 
     
@@ -442,11 +442,11 @@ async def get_360p_stream_url_route(videoid: str):
         return {"stream_url": url}
     except APITimeoutError as e:
         
-        print(f"Stream API error for {videoid}: {e}")
+        
         return Response(content=f'{{"error": "Failed to get stream URL after multiple attempts: {e}"}}', media_type="application/json", status_code=503)
     except Exception as e:
         
-        print(f"Unexpected error for {videoid}: {e}")
+        
         return Response(content=f'{{"error": "An unexpected error occurred: {e}"}}', media_type="application/json", status_code=500)
 
 @app.get('/api/edu/{videoid}', response_class=HTMLResponse)
@@ -461,11 +461,11 @@ async def embed_edu_video(request: Request, videoid: str, proxy: Union[str] = Co
         status_code = e.response.status_code
         if status_code == 404:
             return Response(f"Stream URL for videoid '{videoid}' not found.", status_code=404)
-        print(f"Error calling external API (HTTP {status_code}): {e}")
+        
         return Response("Failed to retrieve stream URL from external service (HTTP Error).", status_code=503)
         
     except (requests.exceptions.RequestException, ValueError, json.JSONDecodeError) as e:
-        print(f"Error calling external API: {e}")
+        
         return Response("Failed to retrieve stream URL from external service (Connection/Format Error).", status_code=503)
 
     
@@ -479,7 +479,6 @@ async def embed_edu_video(request: Request, videoid: str, proxy: Union[str] = Co
         }
     )
 
-# --- /api/short/{channelid} エンドポイントの追加 ---
 @app.get("/api/short/{channelid}")
 async def get_short_data_route(channelid: str):
     
@@ -487,28 +486,13 @@ async def get_short_data_route(channelid: str):
         data = await fetch_short_data_from_external_api(channelid)
         return data
         
-    except requests.exceptions.HTTPError as e:
-        status_code = e.response.status_code
-        print(f"Error calling external Shorts API (HTTP {status_code}) for {channelid}: {e}")
-        try:
-            error_content = e.response.text
-        except:
-            error_content = f'{{"error": "External API returned HTTP error: {status_code}"}}'
-            
-        return Response(
-            content=error_content, 
-            media_type=e.response.headers.get("Content-Type", "application/json"),
-            status_code=status_code
-        )
+    except Exception as e:
         
-    except (requests.exceptions.RequestException, ValueError, json.JSONDecodeError) as e:
-        print(f"Error calling external Shorts API for {channelid}: {e}")
         return Response(
             content=f'{{"error": "Failed to retrieve Shorts data from external service: {e!r}"}}', 
             media_type="application/json", 
             status_code=503
         )
-# --------------------------------------------------
 
 
 @app.get('/', response_class=HTMLResponse)
@@ -516,10 +500,20 @@ async def home(request: Request, yuzu_access_granted: Union[str] = Cookie(None),
     if yuzu_access_granted != "True":
         
         return RedirectResponse(url="/gate", status_code=302)
+    
+    trending_videos = []
+    try:
+        
+        trending_videos = await getTrendingData("jp")
+    except Exception as e:
+        
+        pass
         
     return templates.TemplateResponse("index.html", {
         "request": request, 
-        "proxy": proxy
+        "proxy": proxy,
+        "results": trending_videos,
+        "word": ""
     })
 
 @app.get('/gate', response_class=HTMLResponse)
@@ -541,7 +535,7 @@ async def access_gate_post(request: Request, access_code: str = Form(...)):
         response = RedirectResponse(url="/", status_code=302)
         
         expires_time = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=1)
-        response.set_cookie(key="yuzu_access_granted", value="True", expires=expires_time.strftime("%a, %d-%b-%Y %H:%M:%S GMT"), httppy=True)
+        response.set_cookie(key="yuzu_access_granted", value="True", expires=expires_time.strftime("%a, %d-%b-%Y %H:%M:%S GMT"), httponly=True)
         return response
     else:
         
@@ -576,15 +570,15 @@ async def hashtag_search(tag:str):
 @app.get("/channel/{channelid}", response_class=HTMLResponse)
 async def channel(channelid:str, request: Request, proxy: Union[str] = Cookie(None)):
     
-    # 既存のチャンネル情報と最新動画の取得
     channel_data = await getChannelData(channelid)
     latest_videos = channel_data[0]
     channel_info = channel_data[1]
     
     shorts_videos = []
     try:
-        # 新しく追加したAPIラッパー関数を使用してShortsデータを取得
+        
         shorts_data = await fetch_short_data_from_external_api(channelid)
+        
         
         if isinstance(shorts_data, list):
             shorts_videos = shorts_data
@@ -592,13 +586,13 @@ async def channel(channelid:str, request: Request, proxy: Union[str] = Cookie(No
             shorts_videos = shorts_data["videos"]
         
     except Exception as e:
-        print(f"Error fetching shorts data for {channelid}: {e}")
+        
         shorts_videos = [] 
         
     return templates.TemplateResponse("channel.html", {
         "request": request, 
-        "results": latest_videos, # 最新動画
-        "shorts": shorts_videos,  # Short動画リストをテンプレートに追加
+        "results": latest_videos, 
+        "shorts": shorts_videos,  
         "channel_name": channel_info["channel_name"], 
         "channel_icon": channel_info["channel_icon"], 
         "channel_profile": channel_info["channel_profile"], 
@@ -606,7 +600,7 @@ async def channel(channelid:str, request: Request, proxy: Union[str] = Cookie(No
         "subscribers_count": channel_info["subscribers_count"], 
         "tags": channel_info["tags"], 
         "proxy": proxy
-    }) # <--- 行588付近 (ログの588行目はこの行の後に続く可能性あり)
+    })
 
 @app.get("/playlist", response_class=HTMLResponse)
 async def playlist(list:str, request: Request, page:Union[int, None]=1, proxy: Union[str] = Cookie(None)):
