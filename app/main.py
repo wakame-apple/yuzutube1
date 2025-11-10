@@ -28,11 +28,12 @@ MAX_RETRIES = 10
 RETRY_DELAY = 3.0 
 
 EDU_STREAM_API_BASE_URL = "https://siawaseok.duckdns.org/api/stream/" 
+SHORT_STREAM_API_BASE_URL = "https://yt-dl-kappa.vercel.app/short/"
 
 
 invidious_api_data = {
     'video': [
-        'https://invidious.f5.si/',
+        'https://invidious.lunivers.trade/',
         'https://yt.omada.cafe/',
         'https://inv.perditum.com/',
         'https://inv.perditum.com/',
@@ -44,6 +45,7 @@ invidious_api_data = {
         'https://lekker.gay/',
     ], 
     'playlist': [
+        'https://invidious.lunivers.trade/',
         'https://invidious.ducks.party/',
         'https://super8.absturztau.be/',
         'https://invidious.nikkosphere.com/',
@@ -53,6 +55,7 @@ invidious_api_data = {
         'https://iv.duti.dev/',
     ], 
     'search': [
+        'https://invidious.lunivers.trade/',
         'https://inv.vern.cc/',
         'https://yt.thechangebook.org/',
         'https://invidious.vern.cc/',
@@ -67,6 +70,7 @@ invidious_api_data = {
         'https://iv.duti.dev/',
     ], 
     'channel': [
+        'https://invidious.lunivers.trade/',
         'https://invid-api.poketube.fun/',
         'https://invidious.ducks.party/',
         'https://super8.absturztau.be/',
@@ -77,6 +81,7 @@ invidious_api_data = {
         'https://iv.duti.dev/',
     ], 
     'comments': [
+        'https://invidious.lunivers.trade/',
         'https://invidious.ducks.party/',
         'https://super8.absturztau.be/',
         'https://invidious.nikkosphere.com/',
@@ -130,9 +135,10 @@ def getEduKey():
             return data.get("key")
         
     except requests.exceptions.RequestException as e:
-        print(f"Kahoot API request failed: {e}")
+        
+        pass
     except json.JSONDecodeError:
-        print("Kahoot API returned non-JSON data.")
+        pass
     
     return None
 
@@ -185,15 +191,18 @@ async def getChannelData(channelid):
         
         latest_videos_check = t.get('latestvideo') or t.get('latestVideos')
         if not latest_videos_check:
-            print(f"API returned no latest videos for channel {channelid}. Treating as failure.")
+            
             t = {}
 
     except APITimeoutError:
-        print(f"Error: Invidious API timeout for channel {channelid}. Using default data.")
+        
+        pass
     except json.JSONDecodeError:
-        print(f"Error: JSON decode failed for channel {channelid}. Using default data.")
+        
+        pass
     except Exception as e:
-        print(f"An unexpected error occurred while fetching channel data for {channelid}: {e}")
+        
+        pass
         
     
     
@@ -261,7 +270,7 @@ def get_fallback_hls_url(videoid: str) -> str:
 
 def get_360p_single_url(videoid: str) -> str:
     
-    YTDL_API_URL = f"https://server-thxk.onrender.com/stream/{videoid}"
+    YTDL_API_URL = f"https://server-nu-five-63.vercel.app/stream/{videoid}"
     
     
     try:
@@ -292,7 +301,7 @@ def get_360p_single_url(videoid: str) -> str:
         raise ValueError("Could not find a single 360p stream with audio (itag 18) in the main API response.")
 
     except (requests.exceptions.RequestException, ValueError, json.JSONDecodeError) as e:
-        print(f"Main 360p API failed for {videoid}: {e}. Trying fallback.")
+        
         
         
         try:
@@ -310,10 +319,10 @@ def get_360p_single_url(videoid: str) -> str:
 
 def fetch_high_quality_streams(videoid: str) -> dict:
     
-    YTDL_API_URL = f"https://server-thxk.onrender.com/high/{videoid}"
+    YTDL_API_URL = f"https://server-nu-five-63.vercel.app/high/{videoid}"
     
     try:
-        # 修正点 1: タイムアウト設定を削除し、応答が遅くても待機するようにする
+        
         res = requests.get(
             YTDL_API_URL, 
             headers=getRandomUserAgent()
@@ -321,18 +330,18 @@ def fetch_high_quality_streams(videoid: str) -> dict:
         res.raise_for_status()
         data = res.json()
         
-        # 修正点 2: レスポンス例に基づいて、HLSストリームを含む 'm3u8Url' を抽出する
+        
         hls_url = data.get("m3u8Url")
         
         
         if not hls_url:
-            # 抽出できなかった場合はエラーを発生させる
+            
             raise ValueError("Could not find m3u8Url in the external high-quality stream API response.")
             
         
-        # HLSストリーム（m3u8）は動画と音声を含むため、audio_urlは空文字列を返す
+        
         return {
-            "video_url": hls_url, # HLS (m3u8) マニフェストURL
+            "video_url": hls_url, 
             "audio_url": "",
             "title": f"{data.get('resolution', 'High Quality')} Stream for {videoid}" 
         }
@@ -361,6 +370,21 @@ async def fetch_embed_url_from_external_api(videoid: str) -> str:
             raise ValueError("External API response is missing the 'url' field.")
             
         return embed_url
+
+    return await run_in_threadpool(sync_fetch)
+
+async def fetch_short_data_from_external_api(channelid: str) -> Dict[str, Any]:
+    
+    target_url = f"{SHORT_STREAM_API_BASE_URL}{urllib.parse.quote(channelid)}"
+    
+    def sync_fetch():
+        res = requests.get(
+            target_url, 
+            headers=getRandomUserAgent(), 
+            timeout=max_api_wait_time 
+        )
+        res.raise_for_status()
+        return res.json()
 
     return await run_in_threadpool(sync_fetch)
 
@@ -393,11 +417,11 @@ async def embed_high_quality_video(request: Request, videoid: str, proxy: Union[
         stream_data = await run_in_threadpool(fetch_high_quality_streams, videoid)
         
     except APITimeoutError as e:
-        print(f"Error calling external stream API: {e}")
+        
         return Response(f"Failed to retrieve high-quality stream URL", status_code=503)
         
     except Exception as e:
-        print(f"An unexpected error occurred: {e}")
+        
         return Response("An unexpected error occurred while retrieving stream data.", status_code=500)
 
     
@@ -422,11 +446,11 @@ async def get_360p_stream_url_route(videoid: str):
         return {"stream_url": url}
     except APITimeoutError as e:
         
-        print(f"Stream API error for {videoid}: {e}")
+        
         return Response(content=f'{{"error": "Failed to get stream URL after multiple attempts: {e}"}}', media_type="application/json", status_code=503)
     except Exception as e:
         
-        print(f"Unexpected error for {videoid}: {e}")
+        
         return Response(content=f'{{"error": "An unexpected error occurred: {e}"}}', media_type="application/json", status_code=500)
 
 @app.get('/api/edu/{videoid}', response_class=HTMLResponse)
@@ -441,11 +465,11 @@ async def embed_edu_video(request: Request, videoid: str, proxy: Union[str] = Co
         status_code = e.response.status_code
         if status_code == 404:
             return Response(f"Stream URL for videoid '{videoid}' not found.", status_code=404)
-        print(f"Error calling external API (HTTP {status_code}): {e}")
+        
         return Response("Failed to retrieve stream URL from external service (HTTP Error).", status_code=503)
         
     except (requests.exceptions.RequestException, ValueError, json.JSONDecodeError) as e:
-        print(f"Error calling external API: {e}")
+        
         return Response("Failed to retrieve stream URL from external service (Connection/Format Error).", status_code=503)
 
     
@@ -459,16 +483,41 @@ async def embed_edu_video(request: Request, videoid: str, proxy: Union[str] = Co
         }
     )
 
+@app.get("/api/short/{channelid}")
+async def get_short_data_route(channelid: str):
+    
+    try:
+        data = await fetch_short_data_from_external_api(channelid)
+        return data
+        
+    except Exception as e:
+        
+        return Response(
+            content=f'{{"error": "Failed to retrieve Shorts data from external service: {e!r}"}}', 
+            media_type="application/json", 
+            status_code=503
+        )
+
 
 @app.get('/', response_class=HTMLResponse)
 async def home(request: Request, yuzu_access_granted: Union[str] = Cookie(None), proxy: Union[str] = Cookie(None)):
     if yuzu_access_granted != "True":
         
         return RedirectResponse(url="/gate", status_code=302)
+    
+    trending_videos = []
+    try:
+        
+        trending_videos = await getTrendingData("jp")
+    except Exception as e:
+        
+        pass
         
     return templates.TemplateResponse("index.html", {
         "request": request, 
-        "proxy": proxy
+        "proxy": proxy,
+        "results": trending_videos,
+        "word": ""
     })
 
 @app.get('/gate', response_class=HTMLResponse)
@@ -524,8 +573,38 @@ async def hashtag_search(tag:str):
 
 @app.get("/channel/{channelid}", response_class=HTMLResponse)
 async def channel(channelid:str, request: Request, proxy: Union[str] = Cookie(None)):
-    t = await getChannelData(channelid)
-    return templates.TemplateResponse("channel.html", {"request": request, "results": t[0], "channel_name": t[1]["channel_name"], "channel_icon": t[1]["channel_icon"], "channel_profile": t[1]["channel_profile"], "cover_img_url": t[1]["author_banner"], "subscribers_count": t[1]["subscribers_count"], "tags": t[1]["tags"], "proxy": proxy})
+    
+    channel_data = await getChannelData(channelid)
+    latest_videos = channel_data[0]
+    channel_info = channel_data[1]
+    
+    shorts_videos = []
+    try:
+        
+        shorts_data = await fetch_short_data_from_external_api(channelid)
+        
+        
+        if isinstance(shorts_data, list):
+            shorts_videos = shorts_data
+        elif isinstance(shorts_data, dict) and "videos" in shorts_data:
+            shorts_videos = shorts_data["videos"]
+        
+    except Exception as e:
+        
+        shorts_videos = [] 
+        
+    return templates.TemplateResponse("channel.html", {
+        "request": request, 
+        "results": latest_videos, 
+        "shorts": shorts_videos,  
+        "channel_name": channel_info["channel_name"], 
+        "channel_icon": channel_info["channel_icon"], 
+        "channel_profile": channel_info["channel_profile"], 
+        "cover_img_url": channel_info["author_banner"], 
+        "subscribers_count": channel_info["subscribers_count"], 
+        "tags": channel_info["tags"], 
+        "proxy": proxy
+    })
 
 @app.get("/playlist", response_class=HTMLResponse)
 async def playlist(list:str, request: Request, page:Union[int, None]=1, proxy: Union[str] = Cookie(None)):
