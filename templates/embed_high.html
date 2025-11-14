@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{{ video_title }} - High Quality Stream</title>
+    <title>m3u8</title>
     <style>
         body, html {
             margin: 0;
@@ -31,7 +31,7 @@
     <div id="video-container">
         <video id="video-player" controls playsinline src="{{ video_url }}">
             ブラウザがこの形式の動画ストリームをサポートしていません。
-            (この動画はHLS形式ですが、お使いのブラウザはネイティブHLS再生に対応していない可能性があります。)
+            (HLS再生にネイティブで対応していないブラウザでは再生できません。)
         </video>
     </div>
 
