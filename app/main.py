@@ -6,7 +6,7 @@ import urllib.parse
 from pathlib import Path 
 from typing import Union, List, Dict, Any
 import asyncio 
-import concurrent.futures # <-- 復元: 並列処理に必須
+import concurrent.futures # 並列処理のために必要
 from fastapi import FastAPI, Response, Request, Cookie, Form 
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
@@ -204,7 +204,7 @@ def format_related_video(related_data: dict) -> dict:
     
     return {
         "type": "video", 
-        "id": related_data.get("videoId", failed), # <-- 修正: テンプレートで使用されるキーを追加
+        "id": related_data.get("videoId", failed), 
         "video_id": related_data.get("videoId", failed), 
         "title": related_data.get("title", failed), 
         "author_id": related_data.get("channelId", failed),
@@ -226,8 +226,7 @@ async def getVideoData(videoid):
         
         raise APITimeoutError(f"New video API returned invalid JSON: {e}") from e
 
-    # length_textは新しいAPIのレスポンスから確実なデータが得られないため削除
-    # テンプレート（video.html）でこのフィールドが必要ないことを確認済み
+    
     video_details = {
         'video_urls': [], 
         'description_html': t.get("description", {}).get("formatted", failed), 
@@ -239,7 +238,7 @@ async def getVideoData(videoid):
         'like_count': t.get("likes", failed), 
         'subscribers_count': t.get("author", {}).get("subscribers", failed),
         'published_text': t.get("relativeDate", failed),
-        "length_text": "取得不能" # 暫定的に値を入れておく。
+        "length_text": "取得不能" 
     }
     
     
@@ -362,17 +361,34 @@ def get_360p_single_url(videoid: str) -> str:
 
 
 def fetch_high_quality_streams(videoid: str) -> dict:
+    """高画質ストリーム (M3U8優先) のURLを取得する"""
     
     try:
         formats = get_ytdl_formats(videoid)
         
-        # 720pの結合ストリーム (itag 22) を探す
+        # 1. M3U8 (HLS) フォーマットをフィルタリングし、最高画質のものを探す
+        # heightの降順でソートして、一番目の要素 (最高画質) を選ぶ
+        m3u8_formats = sorted(
+            [f for f in formats if f.get('ext') == 'm3u8' and f.get('url')],
+            key=lambda f: int(f.get('height', 0)) if f.get('height') else 0,
+            reverse=True
+        )
+        
+        if m3u8_formats:
+            best_m3u8 = m3u8_formats[0]
+            # M3U8は結合ストリームなのでaudio_urlは空
+            return {
+                "video_url": best_m3u8["url"],
+                "audio_url": "", 
+                "title": f"{best_m3u8.get('resolution', 'Highest Quality M3U8')} Stream for {videoid}"
+            }
+
+        # 2. M3U8がない場合、itag 22 (720p) や itag 18 (360p) のプログレッシブ形式を探す (フォールバック)
         high_quality_format = next((
             f for f in formats 
             if f.get("itag") == "22" and f.get("url") 
         ), None)
         
-        # 720pがない場合は、360p (itag 18) をフォールバックとして使用
         if not high_quality_format:
             high_quality_format = next((
                 f for f in formats 
@@ -382,16 +398,17 @@ def fetch_high_quality_streams(videoid: str) -> dict:
         if high_quality_format and high_quality_format.get("url"):
             return {
                 "video_url": high_quality_format["url"], 
-                "audio_url": "", # 結合ストリームのため使用しない
+                "audio_url": "", 
                 "title": f"{high_quality_format.get('resolution', 'High Quality')} Stream for {videoid}" 
             }
             
-        raise ValueError("Could not find a high-quality stream (itag 22 or 18) in the API response.")
+        raise ValueError("Could not find any suitable high-quality stream (M3U8 or Progressive) in the API response.")
 
     except requests.exceptions.HTTPError as e:
         raise APITimeoutError(f"Stream API returned HTTP error: {e.response.status_code}") from e
     except (requests.exceptions.RequestException, ValueError, json.JSONDecodeError) as e:
         raise APITimeoutError(f"Error processing stream API response for high quality: {e}") from e
+
 
 async def fetch_embed_url_from_external_api(videoid: str) -> str:
     
@@ -453,17 +470,21 @@ async def get_edu_key_route():
 
 @app.get('/api/stream_high/{videoid}', response_class=HTMLResponse)
 async def embed_high_quality_video(request: Request, videoid: str, proxy: Union[str] = Cookie(None)):
-    
+    """
+    M3U8優先の最高画質ストリームURLを取得し、埋め込みHTMLをレンダリングする
+    """
     try:
-        
+        # M3U8優先のロジックを使用
         stream_data = await run_in_threadpool(fetch_high_quality_streams, videoid)
         
     except APITimeoutError as e:
         
-        return Response(f"Failed to retrieve high-quality stream URL", status_code=503)
+        # 503 Service Unavailable (APIアクセス失敗)
+        return Response(f"Failed to retrieve high-quality stream URL: {e}", status_code=503)
         
     except Exception as e:
         
+        # 500 Internal Server Error (予期せぬエラー)
         return Response("An unexpected error occurred while retrieving stream data.", status_code=500)
 
     
@@ -471,6 +492,7 @@ async def embed_high_quality_video(request: Request, videoid: str, proxy: Union[
         'embed_high.html', 
         {
             "request": request, 
+            # 修正後の fetch_high_quality_streams が返す M3U8 URL (video_url) を渡す
             "video_url": stream_data["video_url"],
             "audio_url": stream_data["audio_url"],
             "video_title": stream_data["title"],
