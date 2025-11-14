@@ -28,7 +28,7 @@ MAX_RETRIES = 10
 RETRY_DELAY = 3.0 
 
 EDU_STREAM_API_BASE_URL = "https://siawaseok.duckdns.org/api/stream/" 
-EDU_VIDEO_API_BASE_URL = "https://siawaseok.duckdns.org/api/video2/" # 新しいAPIベースURLを追加
+STREAM_YTDL_API_BASE_URL = "https://ytdl-0et1.onrender.com/stream/" 
 SHORT_STREAM_API_BASE_URL = "https://yt-dl-kappa.vercel.app/short/"
 
 
@@ -155,82 +155,21 @@ def formatSearchData(data_dict, failed="Load Failed"):
         return {"type": "channel", "author": data_dict.get("author", failed), "id": data_dict.get("authorId", failed), "thumbnail": thumbnail}
     return {"type": "unknown", "data": data_dict}
 
-def fetch_video_data_from_edu_api(videoid: str):
-    
-    target_url = f"{EDU_VIDEO_API_BASE_URL}{urllib.parse.quote(videoid)}"
-    
-    res = requests.get(
-        target_url, 
-        headers=getRandomUserAgent(), 
-        timeout=max_api_wait_time
-    )
-    res.raise_for_status()
-    return res.json()
-
-def format_related_video(related_data: dict) -> dict:
-    
-    
-    is_playlist = related_data.get("playlistId") and related_data.get("playlistId") != related_data.get("videoId")
-    
-    
-    thumbnail_vid_id = related_data.get('videoId') or related_data.get('playlistId')
-    thumbnail_url = f"https://i.ytimg.com/vi/{thumbnail_vid_id}/sddefault.jpg" if thumbnail_vid_id else failed
-    
-    
-    if is_playlist:
-        
-        return {
-            "type": "playlist",
-            "title": related_data.get("title", failed), 
-            "id": related_data.get('playlistId', failed),
-            "author": related_data.get("channel", failed),
-            "thumbnail_url": thumbnail_url
-        }
-    
-    return {
-        "type": "video", 
-        "video_id": related_data.get("videoId", failed), 
-        "title": related_data.get("title", failed), 
-        "author_id": related_data.get("channelId", failed),
-        "author": related_data.get("channel", failed), 
-        "length_text": related_data.get("badge", failed), # 動画の長さ
-        "view_count_text": related_data.get("views", failed),
-        "published_text": related_data.get("uploaded", failed), # アップロードからの経過時間
-        "thumbnail_url": thumbnail_url
-    }
-
 async def getVideoData(videoid):
+    t_text = await run_in_threadpool(requestAPI, f"/videos/{urllib.parse.quote(videoid)}", invidious_api.video)
+    t = json.loads(t_text)
+    recommended_videos = t.get('recommendedvideo') or t.get('recommendedVideos') or []
     
-    try:
-        t = await run_in_threadpool(fetch_video_data_from_edu_api, videoid)
-    except requests.exceptions.RequestException as e:
-        
-        raise APITimeoutError(f"New video API failed: {e}") from e
-    except json.JSONDecodeError as e:
-        
-        raise APITimeoutError(f"New video API returned invalid JSON: {e}") from e
-
+    fallback_videourls = list(reversed([i["url"] for i in t["formatStreams"]]))[:2]
     
-    video_details = {
-        'video_urls': [], 
-        'description_html': t.get("description", {}).get("formatted", failed), 
-        'title': t.get("title", failed),
-        
-        'author_id': t.get("author", {}).get("id", failed), 
-        'author': t.get("author", {}).get("name", failed), 
-        'author_thumbnails_url': t.get("author", {}).get("thumbnail", failed), 
-        'view_count': t.get("views", failed), 
-        'like_count': t.get("likes", failed), 
-        'subscribers_count': t.get("author", {}).get("subscribers", failed),
-        'published_text': t.get("relativeDate", failed), # 公開日/アップロードからの経過時間
-        
-    }
-    
-    
-    recommended_videos = [format_related_video(i) for i in t.get('related', [])]
-
-    
-    return [video_details, recommended_videos]
+    return [{
+        'video_urls': fallback_videourls, 
+        'description_html': t["descriptionHtml"].replace("\n", "<br>"), 'title': t["title"],
+        'length_text': str(datetime.timedelta(seconds=t["lengthSeconds"])), 'author_id': t["authorId"], 'author': t["author"], 'author_thumbnails_url': t["authorThumbnails"][-1]["url"], 'view_count': t["viewCount"], 'like_count': t["likeCount"], 'subscribers_count': t["subCountText"]
+    }, [
+        {"video_id": i["videoId"], "title": i["title"], "author_id": i["authorId"], "author": i["author"], "length_text": str(datetime.timedelta(seconds=i["lengthSeconds"])), "view_count_text": i["viewCountText"]}
+        for i in recommended_videos
+    ]]
     
 async def getSearchData(q, page):
     datas_text = await run_in_threadpool(requestAPI, f"/search?q={urllib.parse.quote(q)}&page={page}&hl=jp", invidious_api.search)
@@ -303,115 +242,92 @@ async def getCommentsData(videoid):
     t = json.loads(t_text)["comments"]
     return [{"author": i["author"], "authoricon": i["authorThumbnails"][-1]["url"], "authorid": i["authorId"], "body": i["contentHtml"].replace("\n", "<br>")} for i in t]
 
-def get_fallback_hls_url(videoid: str) -> str:
-    
-    FALLBACK_API_URL = f"https://test-live-tau.vercel.app/get/url/{videoid}"
-    
-    try:
-        
-        res = requests.get(
-            FALLBACK_API_URL, 
-            headers=getRandomUserAgent(), 
-            timeout=max_api_wait_time
-        )
-        res.raise_for_status()
-        
-        hls_url = res.text.strip()
-        
-        if not hls_url or not hls_url.startswith("https://manifest.googlevideo.com/api/manifest/hls_variant"):
-            raise ValueError("Fallback API response is not a valid HLS URL.")
-            
-        return hls_url
 
-    except requests.exceptions.HTTPError as e:
+def get_ytdl_formats(videoid: str) -> List[Dict[str, Any]]:
+    
+    target_url = f"{STREAM_YTDL_API_BASE_URL}{videoid}"
+    
+    res = requests.get(
+        target_url, 
+        headers=getRandomUserAgent(), 
+        timeout=max_api_wait_time
+    )
+    res.raise_for_status()
+    data = res.json()
+    
+    formats: List[Dict[str, Any]] = data.get("formats", [])
+    if not formats:
+        raise ValueError("Stream API response is missing video formats.")
         
-        raise APITimeoutError(f"Fallback HLS API returned HTTP error: {e.response.status_code}") from e
-    except (requests.exceptions.RequestException, ValueError) as e:
-        
-        raise APITimeoutError(f"Error processing fallback HLS API response: {e}") from e
+    return formats
 
 def get_360p_single_url(videoid: str) -> str:
     
-    YTDL_API_URL = f"https://server-nu-five-63.vercel.app/stream/{videoid}"
-    
-    
     try:
-        res = requests.get(
-            YTDL_API_URL, 
-            headers=getRandomUserAgent(), 
-            timeout=max_api_wait_time
-        )
-        res.raise_for_status()
-        data = res.json()
+        formats = get_ytdl_formats(videoid)
         
-        formats: List[Dict[str, Any]] = data.get("formats", [])
-        if not formats:
-            
-            raise ValueError("External API response is missing video formats.")
-            
-        
+        # 360pの結合ストリーム (itag 18) を探す
         target_format = next((
             f for f in formats 
-            if f.get("itag") == "18" and f.get("videoUrl") 
+            if f.get("itag") == "18" and f.get("url") 
         ), None)
         
-        if target_format and target_format.get("videoUrl"):
-            
-            return target_format["videoUrl"]
+        if target_format and target_format.get("url"):
+            return target_format["url"]
             
         
-        raise ValueError("Could not find a single 360p stream with audio (itag 18) in the main API response.")
+        raise ValueError("Could not find a combined 360p stream (itag 18) in the API response.")
 
+    except requests.exceptions.HTTPError as e:
+        raise APITimeoutError(f"Stream API returned HTTP error: {e.response.status_code}") from e
     except (requests.exceptions.RequestException, ValueError, json.JSONDecodeError) as e:
-        
-        
-        
-        try:
-            return get_fallback_hls_url(videoid)
-        
-        except APITimeoutError as fallback_e:
-            
-            raise APITimeoutError(f"Both primary and fallback stream APIs failed to respond. Primary error: {e}. Fallback error: {fallback_e}") from fallback_e
-            
-        except Exception as fallback_e:
-            
-            raise ValueError(f"Fallback HLS API failed: {fallback_e}") from fallback_e
-
+        raise APITimeoutError(f"Error processing stream API response for 360p: {e}") from e
 
 
 def fetch_high_quality_streams(videoid: str) -> dict:
     
-    YTDL_API_URL = f"https://server-nu-five-63.vercel.app/high/{videoid}"
-    
     try:
+        formats = get_ytdl_formats(videoid)
         
-        res = requests.get(
-            YTDL_API_URL, 
-            headers=getRandomUserAgent()
+        # 1. M3U8 (HLS) フォーマットをフィルタリング
+        # heightの降順でソートし、最高のM3U8を探す
+        m3u8_formats = sorted(
+            [f for f in formats if f.get('ext') == 'm3u8' and f.get('url')],
+            key=lambda f: int(f.get('height', 0)),
+            reverse=True
         )
-        res.raise_for_status()
-        data = res.json()
         
+        if m3u8_formats:
+            best_m3u8 = m3u8_formats[0]
+            return {
+                "video_url": best_m3u8["url"],
+                "audio_url": "", # M3U8は結合ストリーム
+                "title": f"{best_m3u8.get('resolution', 'Highest Quality M3U8')} Stream for {videoid}"
+            }
+
+        # 2. M3U8がない場合、最高の結合プログレッシブストリームを探す
+        # heightがあるプログレッシブフォーマットをフィルタリングし、降順でソート
+        progressive_formats = sorted(
+            [f for f in formats if f.get('url') and f.get('height')],
+            key=lambda f: int(f.get('height', 0)),
+            reverse=True
+        )
         
-        hls_url = data.get("m3u8Url")
-        
-        
-        if not hls_url:
+        if progressive_formats:
+            best_progressive = progressive_formats[0]
             
-            raise ValueError("Could not find m3u8Url in the external high-quality stream API response.")
+            return {
+                "video_url": best_progressive["url"], 
+                "audio_url": "", # 結合ストリーム
+                "title": f"{best_progressive.get('resolution', 'Highest Quality Progressive')} Stream for {videoid}"
+            }
             
-        
-        
-        return {
-            "video_url": hls_url, 
-            "audio_url": "",
-            "title": f"{data.get('resolution', 'High Quality')} Stream for {videoid}" 
-        }
+        raise ValueError("Could not find any suitable high-quality stream (M3U8 or Progressive) in the API response.")
 
     except requests.exceptions.HTTPError as e:
-        raise APITimeoutError(f"External stream API returned HTTP error: {e.response.status_code}") from e
+        raise APITimeoutError(f"Stream API returned HTTP error: {e.response.status_code}") from e
     except (requests.exceptions.RequestException, ValueError, json.JSONDecodeError) as e:
-        raise APITimeoutError(f"Error processing external stream API response: {e}") from e
+        raise APITimeoutError(f"Error processing stream API response for high quality: {e}") from e
 
 async def fetch_embed_url_from_external_api(videoid: str) -> str:
     
@@ -614,36 +530,14 @@ async def access_gate_post(request: Request, access_code: str = Form(...)):
 
 @app.get('/watch', response_class=HTMLResponse)
 async def video(v:str, request: Request, proxy: Union[str] = Cookie(None)):
-    
-    try:
-        video_data = await getVideoData(v)
-    except APITimeoutError as e:
-        
-        return Response(f"動画情報の取得に失敗しました: {e}", status_code=503)
-        
+    video_data = await getVideoData(v)
     
     high_quality_url = ""
     
-    
-    video_details = video_data[0]
-    recommended_videos = video_data[1]
-    
     return templates.TemplateResponse('video.html', {
-        "request": request, 
-        "videoid": v, 
-        "videourls": video_details['video_urls'], 
+        "request": request, "videoid": v, "videourls": video_data[0]['video_urls'], 
         "high_quality_url": high_quality_url,
-        "description": video_details['description_html'], 
-        "video_title": video_details['title'], 
-        "author_id": video_details['author_id'], 
-        "author_icon": video_details['author_thumbnails_url'], 
-        "author": video_details['author'], 
-        "length_text": video_details.get('published_text', failed), 
-        "view_count": video_details['view_count'], 
-        "like_count": video_details['like_count'], 
-        "subscribers_count": video_details['subscribers_count'], 
-        "recommended_videos": recommended_videos, 
-        "proxy":proxy
+        "description": video_data[0]['description_html'], "video_title": video_data[0]['title'], "author_id": video_data[0]['author_id'], "author_icon": video_data[0]['author_thumbnails_url'], "author": video_data[0]['author'], "length_text": video_data[0]['length_text'], "view_count": video_data[0]['view_count'], "like_count": video_data[0]['like_count'], "subscribers_count": video_data[0]['subscribers_count'], "recommended_videos": video_data[1], "proxy":proxy
     })
 
 @app.get("/search", response_class=HTMLResponse)
