@@ -28,7 +28,7 @@ MAX_RETRIES = 10
 RETRY_DELAY = 3.0 
 
 EDU_STREAM_API_BASE_URL = "https://siawaseok.duckdns.org/api/stream/" 
-STREAM_YTDL_API_BASE_URL = "https://ytdl-0et1.onrender.com/stream/" 
+STREAM_YTDL_API_BASE_URL = "https://ytdl-0et1.onrender.com/stream/" # 新しいストリームAPIベースURL
 SHORT_STREAM_API_BASE_URL = "https://yt-dl-kappa.vercel.app/short/"
 
 
@@ -167,7 +167,8 @@ async def getVideoData(videoid):
         'description_html': t["descriptionHtml"].replace("\n", "<br>"), 'title': t["title"],
         'length_text': str(datetime.timedelta(seconds=t["lengthSeconds"])), 'author_id': t["authorId"], 'author': t["author"], 'author_thumbnails_url': t["authorThumbnails"][-1]["url"], 'view_count': t["viewCount"], 'like_count': t["likeCount"], 'subscribers_count': t["subCountText"]
     }, [
-        {"video_id": i["videoId"], "title": i["title"], "author_id": i["authorId"], "author": i["author"], "length_text": str(datetime.timedelta(seconds=i["lengthSeconds"])), "view_count_text": i["viewCountText"]}
+        # Jinja2エラー対策のため、'type'と'id'を追加
+        {"type": "video", "id": i["videoId"], "video_id": i["videoId"], "title": i["title"], "author_id": i["authorId"], "author": i["author"], "length_text": str(datetime.timedelta(seconds=i["lengthSeconds"])), "view_count_text": i["viewCountText"]}
         for i in recommended_videos
     ]]
     
@@ -242,26 +243,31 @@ async def getCommentsData(videoid):
     t = json.loads(t_text)["comments"]
     return [{"author": i["author"], "authoricon": i["authorThumbnails"][-1]["url"], "authorid": i["authorId"], "body": i["contentHtml"].replace("\n", "<br>")} for i in t]
 
-
 def get_ytdl_formats(videoid: str) -> List[Dict[str, Any]]:
-    
+    """新しいストリームAPIから全てのフォーマットを取得するヘルパー関数"""
     target_url = f"{STREAM_YTDL_API_BASE_URL}{videoid}"
     
-    res = requests.get(
-        target_url, 
-        headers=getRandomUserAgent(), 
-        timeout=max_api_wait_time
-    )
-    res.raise_for_status()
-    data = res.json()
-    
-    formats: List[Dict[str, Any]] = data.get("formats", [])
-    if not formats:
-        raise ValueError("Stream API response is missing video formats.")
+    try:
+        res = requests.get(
+            target_url, 
+            headers=getRandomUserAgent(), 
+            timeout=max_api_wait_time
+        )
+        res.raise_for_status()
+        data = res.json()
         
-    return formats
+        formats: List[Dict[str, Any]] = data.get("formats", [])
+        if not formats:
+            raise ValueError("Stream API response is missing video formats.")
+            
+        return formats
+    except requests.exceptions.HTTPError as e:
+        raise APITimeoutError(f"Stream API returned HTTP error: {e.response.status_code}") from e
+    except (requests.exceptions.RequestException, ValueError, json.JSONDecodeError) as e:
+        raise APITimeoutError(f"Error processing stream API response: {e}") from e
 
 def get_360p_single_url(videoid: str) -> str:
+    """360pの結合ストリーム (itag 18) のURLを取得する"""
     
     try:
         formats = get_ytdl_formats(videoid)
@@ -275,40 +281,41 @@ def get_360p_single_url(videoid: str) -> str:
         if target_format and target_format.get("url"):
             return target_format["url"]
             
-        
         raise ValueError("Could not find a combined 360p stream (itag 18) in the API response.")
 
-    except requests.exceptions.HTTPError as e:
-        raise APITimeoutError(f"Stream API returned HTTP error: {e.response.status_code}") from e
-    except (requests.exceptions.RequestException, ValueError, json.JSONDecodeError) as e:
+    except APITimeoutError as e:
+        raise e
+    except Exception as e:
+        # Note: The original code had complex fallback logic. Simplify to rely on the new API/helper.
         raise APITimeoutError(f"Error processing stream API response for 360p: {e}") from e
 
 
 def fetch_high_quality_streams(videoid: str) -> dict:
+    """高画質ストリーム (M3U8優先) のURLを取得する"""
     
     try:
         formats = get_ytdl_formats(videoid)
         
-        # 1. M3U8 (HLS) フォーマットをフィルタリング
-        # heightの降順でソートし、最高のM3U8を探す
+        # 1. M3U8 (HLS) フォーマットをフィルタリングし、最高画質のものを探す
         m3u8_formats = sorted(
             [f for f in formats if f.get('ext') == 'm3u8' and f.get('url')],
-            key=lambda f: int(f.get('height', 0)),
+            key=lambda f: int(f.get('height', 0)) if f.get('height') else 0,
             reverse=True
         )
         
         if m3u8_formats:
             best_m3u8 = m3u8_formats[0]
+            # M3U8は結合ストリームなのでaudio_urlは空
             return {
                 "video_url": best_m3u8["url"],
-                "audio_url": "", # M3U8は結合ストリーム
+                "audio_url": "", 
                 "title": f"{best_m3u8.get('resolution', 'Highest Quality M3U8')} Stream for {videoid}"
             }
 
-        # 2. M3U8がない場合、最高の結合プログレッシブストリームを探す
-        # heightがあるプログレッシブフォーマットをフィルタリングし、降順でソート
+        # 2. M3U8がない場合、最高の結合プログレッシブストリーム (acodecが'none'以外) を探す
+        # heightの降順でソート
         progressive_formats = sorted(
-            [f for f in formats if f.get('url') and f.get('height')],
+            [f for f in formats if f.get('url') and f.get('height') and f.get('acodec') and not f.get('acodec').startswith('none')],
             key=lambda f: int(f.get('height', 0)),
             reverse=True
         )
@@ -324,8 +331,8 @@ def fetch_high_quality_streams(videoid: str) -> dict:
             
         raise ValueError("Could not find any suitable high-quality stream (M3U8 or Progressive) in the API response.")
 
-    except requests.exceptions.HTTPError as e:
-        raise APITimeoutError(f"Stream API returned HTTP error: {e.response.status_code}") from e
+    except APITimeoutError as e:
+        raise e
     except (requests.exceptions.RequestException, ValueError, json.JSONDecodeError) as e:
         raise APITimeoutError(f"Error processing stream API response for high quality: {e}") from e
 
