@@ -6,6 +6,7 @@ import urllib.parse
 from pathlib import Path 
 from typing import Union, List, Dict, Any
 import asyncio 
+import concurrent.futures # <-- 復元: 並列処理に必須
 from fastapi import FastAPI, Response, Request, Cookie, Form 
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
@@ -28,23 +29,14 @@ MAX_RETRIES = 10
 RETRY_DELAY = 3.0 
 
 EDU_STREAM_API_BASE_URL = "https://siawaseok.duckdns.org/api/stream/" 
-STREAM_YTDL_API_BASE_URL = "https://ytdl-0et1.onrender.com/stream/" # 新しいストリームAPIベースURL
+EDU_VIDEO_API_BASE_URL = "https://siawaseok.duckdns.org/api/video2/"
+STREAM_YTDL_API_BASE_URL = "https://ytdl-0et1.onrender.com/stream/" 
 SHORT_STREAM_API_BASE_URL = "https://yt-dl-kappa.vercel.app/short/"
 
 
 invidious_api_data = {
-    'video': [
-        'https://invidious.lunivers.trade/',
-        'https://yt.omada.cafe/',
-        'https://inv.perditum.com/',
-        'https://inv.perditum.com/',
-        'https://iv.melmac.space/', 
-        'https://invidious.nikkosphere.com/',
-        'https://iv.duti.dev/',
-        'https://youtube.alt.tyil.nl/',
-        'https://inv.antopie.org/',
-        'https://lekker.gay/',
-    ], 
+    # 'video'は使用しないが、他のリストは残す
+    'video': [], 
     'playlist': [
         'https://invidious.lunivers.trade/',
         'https://invidious.ducks.party/',
@@ -104,26 +96,46 @@ class InvidiousAPI:
         self.check_video = False
 
 def requestAPI(path, api_urls):
-    
-    starttime = time.time()
+    """
+    複数のAPI URLに対してリクエストを並列で実行し、
+    最初に成功した応答を返す（動画ページ以外の高速化のための修正を復元）
+    """
     
     apis_to_try = api_urls
     
-    for api in apis_to_try:
-        if time.time() - starttime >= max_time - 1:
-            break
-            
-        try:
-            res = requests.get(api + 'api/v1' + path, headers=getRandomUserAgent(), timeout=max_api_wait_time)
-            
-            if res.status_code == requests.codes.ok and isJSON(res.text):
-                return res.text
-            
-        except requests.exceptions.RequestException:
-            continue
+    if not apis_to_try:
+        raise APITimeoutError("No API instances configured for this type of request.")
+        
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(apis_to_try)) as executor:
+        # 実行のためのタスクをサブミット
+        future_to_api = {
+            executor.submit(
+                requests.get, 
+                api + 'api/v1' + path, 
+                headers=getRandomUserAgent(), 
+                timeout=max_api_wait_time
+            ): api for api in apis_to_try
+        }
+        
+        # 完了したタスクから順に結果を取得
+        for future in concurrent.futures.as_completed(future_to_api, timeout=max_time):
+            try:
+                res = future.result()
+                
+                if res.status_code == requests.codes.ok and isJSON(res.text):
+                    # 最初の成功した応答を返す
+                    return res.text
+                
+            except requests.exceptions.RequestException:
+                continue # APIが失敗したかタイムアウト。次のタスクの結果を待つ
+            except concurrent.futures.TimeoutError:
+                # 全てのリクエストがmax_time内に完了しなかった
+                break
             
     
-    raise APITimeoutError("All available API instances failed to respond.")
+    # 全てのリクエストが失敗したか、指定時間内に完了しなかった
+    raise APITimeoutError("All available API instances failed to respond or timed out.")
+
 def getEduKey():
     
     api_url = "https://apis.kahoot.it/media-api/youtube/key"
@@ -155,22 +167,86 @@ def formatSearchData(data_dict, failed="Load Failed"):
         return {"type": "channel", "author": data_dict.get("author", failed), "id": data_dict.get("authorId", failed), "thumbnail": thumbnail}
     return {"type": "unknown", "data": data_dict}
 
+def fetch_video_data_from_edu_api(videoid: str):
+    
+    target_url = f"{EDU_VIDEO_API_BASE_URL}{urllib.parse.quote(videoid)}"
+    
+    res = requests.get(
+        target_url, 
+        headers=getRandomUserAgent(), 
+        timeout=max_api_wait_time
+    )
+    res.raise_for_status()
+    return res.json()
+
+def format_related_video(related_data: dict) -> dict:
+    """
+    関連動画のデータをJinjaテンプレートで表示可能な形式に変換する
+    """
+    
+    
+    is_playlist = related_data.get("playlistId") and related_data.get("playlistId") != related_data.get("videoId")
+    
+    
+    thumbnail_vid_id = related_data.get('videoId') or related_data.get('playlistId')
+    thumbnail_url = f"https://i.ytimg.com/vi/{thumbnail_vid_id}/sddefault.jpg" if thumbnail_vid_id else failed
+    
+    
+    if is_playlist:
+        
+        return {
+            "type": "playlist",
+            "title": related_data.get("title", failed), 
+            "id": related_data.get('playlistId', failed),
+            "author": related_data.get("channel", failed),
+            "thumbnail_url": thumbnail_url
+        }
+    
+    return {
+        "type": "video", 
+        "id": related_data.get("videoId", failed), # <-- 修正: テンプレートで使用されるキーを追加
+        "video_id": related_data.get("videoId", failed), 
+        "title": related_data.get("title", failed), 
+        "author_id": related_data.get("channelId", failed),
+        "author": related_data.get("channel", failed), 
+        "length_text": related_data.get("badge", failed), 
+        "view_count_text": related_data.get("views", failed),
+        "published_text": related_data.get("uploaded", failed), 
+        "thumbnail_url": thumbnail_url
+    }
+
 async def getVideoData(videoid):
-    t_text = await run_in_threadpool(requestAPI, f"/videos/{urllib.parse.quote(videoid)}", invidious_api.video)
-    t = json.loads(t_text)
-    recommended_videos = t.get('recommendedvideo') or t.get('recommendedVideos') or []
     
-    fallback_videourls = list(reversed([i["url"] for i in t["formatStreams"]]))[:2]
+    try:
+        t = await run_in_threadpool(fetch_video_data_from_edu_api, videoid)
+    except requests.exceptions.RequestException as e:
+        
+        raise APITimeoutError(f"New video API failed: {e}") from e
+    except json.JSONDecodeError as e:
+        
+        raise APITimeoutError(f"New video API returned invalid JSON: {e}") from e
+
+    # length_textは新しいAPIのレスポンスから確実なデータが得られないため削除
+    # テンプレート（video.html）でこのフィールドが必要ないことを確認済み
+    video_details = {
+        'video_urls': [], 
+        'description_html': t.get("description", {}).get("formatted", failed), 
+        'title': t.get("title", failed),
+        'author_id': t.get("author", {}).get("id", failed), 
+        'author': t.get("author", {}).get("name", failed), 
+        'author_thumbnails_url': t.get("author", {}).get("thumbnail", failed), 
+        'view_count': t.get("views", failed), 
+        'like_count': t.get("likes", failed), 
+        'subscribers_count': t.get("author", {}).get("subscribers", failed),
+        'published_text': t.get("relativeDate", failed),
+        "length_text": "取得不能" # 暫定的に値を入れておく。
+    }
     
-    return [{
-        'video_urls': fallback_videourls, 
-        'description_html': t["descriptionHtml"].replace("\n", "<br>"), 'title': t["title"],
-        'length_text': str(datetime.timedelta(seconds=t["lengthSeconds"])), 'author_id': t["authorId"], 'author': t["author"], 'author_thumbnails_url': t["authorThumbnails"][-1]["url"], 'view_count': t["viewCount"], 'like_count': t["likeCount"], 'subscribers_count': t["subCountText"]
-    }, [
-        # Jinja2エラー対策のため、'type'と'id'を追加
-        {"type": "video", "id": i["videoId"], "video_id": i["videoId"], "title": i["title"], "author_id": i["authorId"], "author": i["author"], "length_text": str(datetime.timedelta(seconds=i["lengthSeconds"])), "view_count_text": i["viewCountText"]}
-        for i in recommended_videos
-    ]]
+    
+    recommended_videos = [format_related_video(i) for i in t.get('related', [])]
+
+    
+    return [video_details, recommended_videos]
     
 async def getSearchData(q, page):
     datas_text = await run_in_threadpool(requestAPI, f"/search?q={urllib.parse.quote(q)}&page={page}&hl=jp", invidious_api.search)
@@ -243,31 +319,26 @@ async def getCommentsData(videoid):
     t = json.loads(t_text)["comments"]
     return [{"author": i["author"], "authoricon": i["authorThumbnails"][-1]["url"], "authorid": i["authorId"], "body": i["contentHtml"].replace("\n", "<br>")} for i in t]
 
+
 def get_ytdl_formats(videoid: str) -> List[Dict[str, Any]]:
-    """新しいストリームAPIから全てのフォーマットを取得するヘルパー関数"""
+    
     target_url = f"{STREAM_YTDL_API_BASE_URL}{videoid}"
     
-    try:
-        res = requests.get(
-            target_url, 
-            headers=getRandomUserAgent(), 
-            timeout=max_api_wait_time
-        )
-        res.raise_for_status()
-        data = res.json()
+    res = requests.get(
+        target_url, 
+        headers=getRandomUserAgent(), 
+        timeout=max_api_wait_time
+    )
+    res.raise_for_status()
+    data = res.json()
+    
+    formats: List[Dict[str, Any]] = data.get("formats", [])
+    if not formats:
+        raise ValueError("Stream API response is missing video formats.")
         
-        formats: List[Dict[str, Any]] = data.get("formats", [])
-        if not formats:
-            raise ValueError("Stream API response is missing video formats.")
-            
-        return formats
-    except requests.exceptions.HTTPError as e:
-        raise APITimeoutError(f"Stream API returned HTTP error: {e.response.status_code}") from e
-    except (requests.exceptions.RequestException, ValueError, json.JSONDecodeError) as e:
-        raise APITimeoutError(f"Error processing stream API response: {e}") from e
+    return formats
 
 def get_360p_single_url(videoid: str) -> str:
-    """360pの結合ストリーム (itag 18) のURLを取得する"""
     
     try:
         formats = get_ytdl_formats(videoid)
@@ -281,58 +352,44 @@ def get_360p_single_url(videoid: str) -> str:
         if target_format and target_format.get("url"):
             return target_format["url"]
             
+        
         raise ValueError("Could not find a combined 360p stream (itag 18) in the API response.")
 
-    except APITimeoutError as e:
-        raise e
-    except Exception as e:
-        # Note: The original code had complex fallback logic. Simplify to rely on the new API/helper.
+    except requests.exceptions.HTTPError as e:
+        raise APITimeoutError(f"Stream API returned HTTP error: {e.response.status_code}") from e
+    except (requests.exceptions.RequestException, ValueError, json.JSONDecodeError) as e:
         raise APITimeoutError(f"Error processing stream API response for 360p: {e}") from e
 
 
 def fetch_high_quality_streams(videoid: str) -> dict:
-    """高画質ストリーム (M3U8優先) のURLを取得する"""
     
     try:
         formats = get_ytdl_formats(videoid)
         
-        # 1. M3U8 (HLS) フォーマットをフィルタリングし、最高画質のものを探す
-        m3u8_formats = sorted(
-            [f for f in formats if f.get('ext') == 'm3u8' and f.get('url')],
-            key=lambda f: int(f.get('height', 0)) if f.get('height') else 0,
-            reverse=True
-        )
+        # 720pの結合ストリーム (itag 22) を探す
+        high_quality_format = next((
+            f for f in formats 
+            if f.get("itag") == "22" and f.get("url") 
+        ), None)
         
-        if m3u8_formats:
-            best_m3u8 = m3u8_formats[0]
-            # M3U8は結合ストリームなのでaudio_urlは空
-            return {
-                "video_url": best_m3u8["url"],
-                "audio_url": "", 
-                "title": f"{best_m3u8.get('resolution', 'Highest Quality M3U8')} Stream for {videoid}"
-            }
+        # 720pがない場合は、360p (itag 18) をフォールバックとして使用
+        if not high_quality_format:
+            high_quality_format = next((
+                f for f in formats 
+                if f.get("itag") == "18" and f.get("url")
+            ), None)
 
-        # 2. M3U8がない場合、最高の結合プログレッシブストリーム (acodecが'none'以外) を探す
-        # heightの降順でソート
-        progressive_formats = sorted(
-            [f for f in formats if f.get('url') and f.get('height') and f.get('acodec') and not f.get('acodec').startswith('none')],
-            key=lambda f: int(f.get('height', 0)),
-            reverse=True
-        )
-        
-        if progressive_formats:
-            best_progressive = progressive_formats[0]
-            
+        if high_quality_format and high_quality_format.get("url"):
             return {
-                "video_url": best_progressive["url"], 
-                "audio_url": "", # 結合ストリーム
-                "title": f"{best_progressive.get('resolution', 'Highest Quality Progressive')} Stream for {videoid}"
+                "video_url": high_quality_format["url"], 
+                "audio_url": "", # 結合ストリームのため使用しない
+                "title": f"{high_quality_format.get('resolution', 'High Quality')} Stream for {videoid}" 
             }
             
-        raise ValueError("Could not find any suitable high-quality stream (M3U8 or Progressive) in the API response.")
+        raise ValueError("Could not find a high-quality stream (itag 22 or 18) in the API response.")
 
-    except APITimeoutError as e:
-        raise e
+    except requests.exceptions.HTTPError as e:
+        raise APITimeoutError(f"Stream API returned HTTP error: {e.response.status_code}") from e
     except (requests.exceptions.RequestException, ValueError, json.JSONDecodeError) as e:
         raise APITimeoutError(f"Error processing stream API response for high quality: {e}") from e
 
@@ -537,6 +594,7 @@ async def access_gate_post(request: Request, access_code: str = Form(...)):
 
 @app.get('/watch', response_class=HTMLResponse)
 async def video(v:str, request: Request, proxy: Union[str] = Cookie(None)):
+    
     video_data = await getVideoData(v)
     
     high_quality_url = ""
@@ -554,7 +612,7 @@ async def search(q:str, request: Request, page:Union[int, None]=1, proxy: Union[
 
 @app.get("/hashtag/{tag}")
 async def hashtag_search(tag:str):
-    return RedirectResponse(f"/search?q={tag}", status_code=302)
+    return RedirectResponse(f"/search?q={urllib.parse.quote(tag)}", status_code=302)
 
 @app.get("/channel/{channelid}", response_class=HTMLResponse)
 async def channel(channelid:str, request: Request, proxy: Union[str] = Cookie(None)):
@@ -602,8 +660,20 @@ async def comments(request: Request, v:str):
     return templates.TemplateResponse("comments.html", {"request": request, "comments": comments_data})
 
 @app.get("/thumbnail")
-def thumbnail(v:str):
-    return Response(content = requests.get(f"https://img.youtube.com/vi/{v}/0.jpg").content, media_type="image/jpeg")
+async def thumbnail(v:str): # <-- 非同期化を復元
+    def sync_fetch_thumbnail(video_id: str):
+        # YouTubeのサムネイルサーバーから画像を同期的に取得
+        res = requests.get(f"https://img.youtube.com/vi/{video_id}/0.jpg", timeout=(1.0, 3.0)) 
+        res.raise_for_status()
+        return res.content
+
+    try:
+        # スレッドプールでブロッキングI/Oを実行
+        content = await run_in_threadpool(sync_fetch_thumbnail, v)
+        return Response(content=content, media_type="image/jpeg")
+    except requests.exceptions.RequestException:
+        # 失敗した場合は404を返す
+        return Response(status_code=404) 
 
 @app.get("/suggest")
 def suggest(keyword:str):
